@@ -1,5 +1,6 @@
 import sys
 import subprocess
+from auth import CREDENTIAL_FILE, load_credentials, verify_password
 
 def install_requirements():
     """Install required libraries before running the script."""
@@ -34,10 +35,7 @@ BUFFER_SIZE = 128 * 1024  # Buffer size (128 KB)
 
 terminate_server = False
 
-iam_file = './id_passwd.txt'
-
-if not iam_file:
-    print("id_passwd.txt is not found")
+iam_file = CREDENTIAL_FILE
 
 uname = dict()
 clients = []
@@ -93,7 +91,11 @@ def validate_user(client,addr):
                     found = True
         if(found == False):
             client.send("Error".encode())
-            validate_user(client,addr)
+            if not validate_user(client, addr):
+                client.close()
+                # t_c.close()
+                return
+            send_options()
 
 def delete_file(client, addr):
     user = uname[addr]
@@ -394,6 +396,42 @@ def establish_communication(host, port):
         # clients.append(client)
 
         # send_options(client,addr)
+
+def validate_user(client, addr):
+    try:
+        accounts = load_credentials(iam_file)
+    except (OSError, ValueError):
+        print("Cannot load valid account records.")
+        return False
+
+    while not terminate_server:
+        try:
+            data = client.recv(BUFFER_SIZE)
+
+            if not data:
+                return False
+
+            try:
+                username, password = data.decode("utf-8").split("---", 1)
+            except (UnicodeDecodeError, ValueError):
+                client.sendall(b"Error")
+                continue
+
+            stored_hash = accounts.get(username, "")
+
+            if verify_password(password, stored_hash):
+                uname[addr] = username
+                fc[username] = 0
+
+                client.sendall(b"200 Success")
+                return True
+
+            client.sendall(b"Error")
+
+        except OSError:
+            return False
+
+    return False
 
 if __name__ == "__main__":
     establish_communication(HOST, PORT)

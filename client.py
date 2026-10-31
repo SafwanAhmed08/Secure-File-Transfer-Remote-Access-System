@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import getpass
 
 def install_requirements():
     """Install required libraries before running the script."""
@@ -188,7 +189,7 @@ def main():
         username = input("Username:\t\t")
         if terminate:
             os._exit(1)  # Force terminate all threads
-        password = input("Password:\t\t")
+        password = getpass.getpass("Password:\t\t")
 
         if terminate:
             os._exit(1)  # Force terminate all threads
