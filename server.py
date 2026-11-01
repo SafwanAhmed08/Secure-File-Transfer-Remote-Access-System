@@ -1,6 +1,9 @@
 import sys
 import subprocess
-from auth import CREDENTIAL_FILE, load_credentials, verify_password
+import sqlite3
+
+from auth import authenticate_user
+from database import initialise_database
 
 def install_requirements():
     """Install required libraries before running the script."""
@@ -35,7 +38,6 @@ BUFFER_SIZE = 128 * 1024  # Buffer size (128 KB)
 
 terminate_server = False
 
-iam_file = CREDENTIAL_FILE
 
 uname = dict()
 clients = []
@@ -67,35 +69,39 @@ signal.signal(signal.SIGTERM, signal_handler)
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
 
-def validate_user(client,addr):
-    if terminate_server == True:
-        os._exit(0)
-    creds  = client.recv(BUFFER_SIZE).decode()
-    if creds != "":
-        username,password = creds.split("---")
-    else:
-        username,password = "", ""
-        sys.exit(1)
-    found = False
-    with open(iam_file,"r") as f:
-        for line in f:
-            db_uname,db_password = line.split()
-            if(username == db_uname):
-                if(password == db_password):
-                    client.send("200 Success".encode())
-                    global uname
-                    if(addr not in uname.keys()):
-                        uname[addr] = ""
-                    uname[addr] = username
-                    fc[uname[addr]] = 0
-                    found = True
-        if(found == False):
-            client.send("Error".encode())
-            if not validate_user(client, addr):
-                client.close()
-                # t_c.close()
-                return
-            send_options()
+
+def validate_user(client, addr):
+    """Authenticate before allowing any file operation on this connection."""
+    # Retry with a loop instead of recursion, which would grow the call stack
+    # after each failed password. The existing wire format remains unchanged.
+    while not terminate_server:
+        try:
+            data = client.recv(BUFFER_SIZE)
+            if not data:  # Empty bytes mean the peer closed its connection.
+                return False
+            try:
+                # Split once: the password may itself contain "---".
+                username, password = data.decode("utf-8").split("---", 1)
+            except (UnicodeDecodeError, ValueError):
+                client.sendall(b"Error")
+                continue
+
+            # auth.py fetches one SQLite record and verifies its salted hash.
+            # No plaintext-file fallback is allowed if SQLite is unavailable.
+            if authenticate_user(username, password):
+                uname[addr] = username
+                fc[username] = 0
+                client.sendall(b"200 Success")
+                return True
+
+            # The same response covers unknown users and incorrect passwords.
+            client.sendall(b"Error")
+        except (OSError, ValueError, sqlite3.Error):
+            # Fail closed: a disconnected client or database error must never
+            # grant access to the file menu. Do not log submitted credentials.
+            return False
+    return False
+
 
 def delete_file(client, addr):
     user = uname[addr]
@@ -352,7 +358,15 @@ def on_user(client,addr,t_c):
     clients.append(client)
     termination_clients.append(t_c)
     
-    validate_user(client,addr)
+    # A failed login must end this handler, not fall through into the file menu.
+    if not validate_user(client, addr):
+        client.close()
+        t_c.close()
+        if client in clients:
+            clients.remove(client)
+        if t_c in termination_clients:
+            termination_clients.remove(t_c)
+        return
 
 
     if terminate_server:
@@ -364,8 +378,16 @@ def on_user(client,addr,t_c):
 def establish_communication(host, port):
     if terminate_server:
         sys.exit(1)
+    # Allow restarting after previous connections enter TIME_WAIT.
+    # Configure address reuse before binding.
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    termination_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    # Bind each socket once.
     server_socket.bind((HOST, PORT))
-    termination_socket.bind((HOST,PORT+1))
+    termination_socket.bind((HOST, PORT + 1))
+
+    # Start accepting connections.
     termination_socket.listen(1)
     server_socket.listen(1)
     print(f"Server listening on {host}:{port}")
@@ -397,41 +419,12 @@ def establish_communication(host, port):
 
         # send_options(client,addr)
 
-def validate_user(client, addr):
-    try:
-        accounts = load_credentials(iam_file)
-    except (OSError, ValueError):
-        print("Cannot load valid account records.")
-        return False
-
-    while not terminate_server:
-        try:
-            data = client.recv(BUFFER_SIZE)
-
-            if not data:
-                return False
-
-            try:
-                username, password = data.decode("utf-8").split("---", 1)
-            except (UnicodeDecodeError, ValueError):
-                client.sendall(b"Error")
-                continue
-
-            stored_hash = accounts.get(username, "")
-
-            if verify_password(password, stored_hash):
-                uname[addr] = username
-                fc[username] = 0
-
-                client.sendall(b"200 Success")
-                return True
-
-            client.sendall(b"Error")
-
-        except OSError:
-            return False
-
-    return False
 
 if __name__ == "__main__":
+    # Schema creation is idempotent: existing users are preserved. An empty
+    # database grants no access until an account is created through auth.py.
+    try:
+        initialise_database()
+    except (OSError, ValueError, sqlite3.Error):
+        sys.exit("Cannot initialise account database; server was not started.")
     establish_communication(HOST, PORT)
