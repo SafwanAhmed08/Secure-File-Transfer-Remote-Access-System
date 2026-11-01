@@ -3,7 +3,7 @@
 ## System Architecture Overview
 
 ### 1. Network Communication Model
-- Protocol: Custom TCP-based socket communication
+- Protocol: Custom TCP communication over verified TLS (minimum TLS 1.2)
 - Host: Localhost (127.0.0.1)
 - Primary Port: 9999
 - Termination Port: 10000
@@ -50,7 +50,7 @@
    - Create role-based access control
 
 2. **Communication Security**
-   - Integrate SSL/TLS encryption
+   - TLS implemented on both connections with client-side server certificate verification
    - Implement certificate-based authentication
    - Add secure key exchange mechanism
 
@@ -66,7 +66,7 @@
 
 ## System Limitations and Constraints
 - Single-host deployment
-- TCP transport is not encrypted (password hashes protect storage only)
+- Local development certificate requires explicit trust and expires after 30 days
 - No advanced access control
 - Limited file type support
 
@@ -135,6 +135,9 @@ python3 database.py
 # Passwords are entered at hidden prompts, not included in the command.
 python3 auth.py set-password alice
 
+# Once per local checkout: generate the development certificate.
+python3 setup_tls.py
+
 # In separate terminals:
 python3 server.py
 python3 client.py
@@ -185,7 +188,73 @@ and the rule that failed authentication cannot enter the file menu.
 
 ### Remaining security work
 
-The custom TCP connection still sends passwords and files without encryption.
-Keep the loopback addresses while learning; add verified TLS or HTTPS before
-using real credentials across a network. Message framing, login rate limiting,
-and validation of file-operation paths also remain separate improvements.
+Both TCP connections now require TLS, including the shutdown notification port.
+Message framing, login rate limiting, secure pairing of simultaneous clients'
+two connections, and validation of file-operation paths remain separate
+improvements. TLS protects bytes in transit; it does not fix these application
+protocol or authorisation issues.
+
+
+## TLS: setup and learning guide
+
+```sh
+# Generate a local certificate/key (already generated when TLS was installed).
+python3 setup_tls.py
+
+# Start in separate terminals. Existing SQLite accounts still work.
+python3 server.py
+python3 client.py
+```
+
+No new Python packages are needed. Certificate creation uses the installed
+`openssl` command. `setup_tls.py` refuses to overwrite an existing certificate or
+key. The generated certificate is valid for 30 days and covers `localhost`,
+`127.0.0.1`, and `::1`; the application's default connections still use IPv4
+`127.0.0.1` on ports 9999 and 10000. Expired certificates are rejected.
+
+- **`certs/server.key`** is the private key, readable only by its owner on
+  macOS/Linux. Keep it on the server and never commit or distribute it.
+- **`certs/server.crt`** is the public certificate. The client explicitly trusts
+  this file and verifies that the hostname/IP it connects to appears in its
+  Subject Alternative Names. Install it on a client through a trusted channel.
+- Both artifacts are ignored by Git. Copy only `server.crt` to a different
+  client's `certs/` folder; it does not need `server.key` or account database files.
+
+For certificate renewal, stop the server, deliberately move the old certificate
+and key to a private location, rerun `setup_tls.py`, and replace trusted copies
+on clients. Changing HOST to another IP/name requires a certificate with that
+IP/name in its SAN. Do not disable verification to bypass an error. For deployment,
+use an appropriate CA-issued certificate and trust configuration instead of this
+localhost development certificate. Trust is configured per application; nothing
+is installed into the operating system's trust store.
+
+### What the code does
+
+1. `create_server_context()` loads the certificate and private key. A minimum
+   TLS version of 1.2 allows negotiation of TLS 1.3 on supported installations.
+2. `create_client_context()` loads the trusted certificate. Certificate and
+   hostname verification remain enabled; no insecure/plaintext fallback exists.
+3. `connect_tls()` connects TCP, then completes a verified TLS handshake before
+   returning the socket. No username, password or file data is sent before that.
+4. The server accepts a TCP socket and wraps it with TLS before accepting and
+   securing the notification socket. That ordering avoids a startup deadlock.
+5. Handshakes and the wait for the second connection have a five-second timeout.
+   After a handshake, sockets return to blocking mode so typing a password or
+   selecting a file is not subject to that short timeout.
+6. Application `sendall()` and `recv()` calls then pass through the TLS socket:
+   the TLS library handles encryption, integrity checks and session keys.
+   SQLite password hashing and username/password login remain separate.
+
+This uses server-authenticated TLS, not mutual TLS: the client verifies the
+server certificate, and the server authenticates users through their passwords.
+See [Python's ssl documentation](https://docs.python.org/3/library/ssl.html).
+
+The upload EOF marker was also corrected to match the receiver exactly; the
+previous `.EOF` marker appended an extra dot to uploaded files. The legacy EOF
+protocol still needs length-based framing for arbitrary binary contents and
+unpredictable TCP/TLS read boundaries.
+
+Run `python3 -B -m unittest discover -s tests -v` for authentication and TLS tests.
+TLS tests use temporary keys/certificates and account data. They exercise trusted
+connections, untrusted/wrong-host rejection, plaintext rejection, bounded
+handshakes, both application channels, and encrypted upload/download behavior.

@@ -1,6 +1,13 @@
 import sys
 import subprocess
 import sqlite3
+import ssl
+
+from tls_transport import (
+    HANDSHAKE_TIMEOUT,
+    create_server_context,
+    wrap_server_connection,
+)
 
 from auth import authenticate_user
 from database import initialise_database
@@ -55,19 +62,29 @@ def signal_handler(signum, frame):
     global terminate_server
     print("\nTermination signal received. Shutting down the server gracefully.")
     terminate_server = True
-    for c in termination_clients:
-        c.sendall("Terminate".encode())
-        c.close()
+    for c in tuple(termination_clients):
+        try:
+            c.sendall(b"Terminate")  # This notification is also TLS-encrypted.
+        except OSError:
+            pass  # A disconnected client must not prevent server shutdown.
+        finally:
+            c.close()
+    # Closing a socket alone may leave another thread blocked inside recv().
+    # shutdown wakes those reads so worker threads can finish before process exit.
+    for connection in tuple(clients):
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            connection.close()
     server_socket.close()
+    termination_socket.close()
     sys.exit(0)
 
 # Register signal handler for SIGINT and SIGTERM
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
-
-# Initialize server socket
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
 
 
 def validate_user(client, addr):
@@ -377,47 +394,48 @@ def on_user(client,addr,t_c):
 
 def establish_communication(host, port):
     if terminate_server:
-        sys.exit(1)
-    # Allow restarting after previous connections enter TIME_WAIT.
-    # Configure address reuse before binding.
+        return
+
+    # Fail before listening if the certificate/key is missing or invalid. The
+    # same server identity protects both the data port and notification port.
+    context = create_server_context()
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     termination_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((host, port))
+    termination_socket.bind((host, port + 1))
+    server_socket.listen(5)
+    termination_socket.listen(5)
+    print(f"TLS server listening on {host}:{port} and {host}:{port + 1}")
 
-    # Bind each socket once.
-    server_socket.bind((HOST, PORT))
-    termination_socket.bind((HOST, PORT + 1))
+    while not terminate_server:
+        client = t_c = None
+        try:
+            client, address = server_socket.accept()
+        except socket.timeout:
+            continue  # Recheck the shutdown flag periodically.
 
-    # Start accepting connections.
-    termination_socket.listen(1)
-    server_socket.listen(1)
-    print(f"Server listening on {host}:{port}")
-    print(f"Termination Server listening on {host}:{port+1}")
-    while True:
-        while not terminate_server:
-            try:
-                client, address = server_socket.accept()
-                print(f"Connection received from {address}")
-                t_c, t_a = termination_socket.accept()
-                print(f"Termination Connection rx from {t_a}")
+        try:
+            # Complete this handshake BEFORE waiting for the second connection.
+            # The client verifies it before connecting its notification socket;
+            # reversing this order would deadlock the client and server.
+            client = wrap_server_connection(client, context)
 
-                t1 = threading.Thread(target=on_user, args=(client, address, t_c))
-                t1.start()
-            except socket.timeout:
-                continue
-        # client, address = server_socket.accept()
-        # print(f"Connection received from {address}")
+            # Do not let an incomplete connection pair block all later clients
+            # forever. The helper also bounds each individual TLS handshake.
+            termination_socket.settimeout(HANDSHAKE_TIMEOUT)
+            t_c, _ = termination_socket.accept()
+            t_c = wrap_server_connection(t_c, context)
 
-        # t_c,t_a = termination_socket.accept()
-        # print(f"Termination Connection rx from {t_a}")
-
-        # t1 = threading.Thread(target=on_user,args=(client,address,t_c))
-        # t1.start()
-
-        # validate_user(client,address)
-
-        # clients.append(client)
-
-        # send_options(client,addr)
+            print(f"TLS transport established: {client.version()}")
+            thread = threading.Thread(target=on_user, args=(client, address, t_c))
+            thread.start()
+        except (OSError, ssl.SSLError):
+            # Reject plaintext, stalled handshakes, and disconnected peers. Never
+            # fall back to raw TCP or pass a half-secured pair into on_user().
+            for connection in (client, t_c):
+                if connection is not None:
+                    connection.close()
+            print("Connection rejected: TLS handshake or connection pair failed.")
 
 
 if __name__ == "__main__":
@@ -427,4 +445,10 @@ if __name__ == "__main__":
         initialise_database()
     except (OSError, ValueError, sqlite3.Error):
         sys.exit("Cannot initialise account database; server was not started.")
-    establish_communication(HOST, PORT)
+    try:
+        establish_communication(HOST, PORT)
+    except (OSError, ssl.SSLError) as error:
+        sys.exit(f"Server startup failed: {error}. For certificates, run python3 setup_tls.py.")
+    finally:
+        server_socket.close()
+        termination_socket.close()

@@ -1,6 +1,9 @@
 import subprocess
 import sys
 import getpass
+import ssl
+
+from tls_transport import connect_tls, create_client_context
 
 def install_requirements():
     """Install required libraries before running the script."""
@@ -31,11 +34,19 @@ HOST = "127.0.0.1"  # Server IP (localhost)
 PORT = 9999         # Server port (matching the server)
 BUFFER_SIZE = 128 * 1024  # Buffer size (128 KB)
 
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect((HOST, PORT))
-
-termination_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-termination_socket.connect((HOST, PORT + 1))
+# Load a trusted public certificate, never the server's private key. Both
+# connections must pass certificate and host checks before login can start.
+client_socket = termination_socket = None
+try:
+    context = create_client_context()
+    client_socket = connect_tls(HOST, PORT, context)
+    termination_socket = connect_tls(HOST, PORT + 1, context)
+    print(f"Connected using {client_socket.version()} with certificate verification.")
+except (OSError, ssl.SSLError) as error:
+    for connection in (client_socket, termination_socket):
+        if connection is not None:
+            connection.close()
+    sys.exit(f"Secure connection failed: {error}. Check the server and trusted certs/server.crt.")
 
 terminate = False
 login = False
@@ -54,7 +65,7 @@ def on_terminate():
     while True:
         try:
             message = termination_socket.recv(BUFFER_SIZE).decode()
-            if message == "Terminate":
+            if message == "Terminate" or not message:
                 terminate = True
                 print("\nServer has been terminated. Closing connection...")
                 try:
@@ -105,7 +116,8 @@ def send_file(file_path):
         with open(file_path, "rb") as f:
             while not terminate and (chunk := f.read(BUFFER_SIZE)):
                 client_socket.sendall(chunk)
-            client_socket.sendall(".EOF".encode())
+            # Match the server's EOF marker exactly; a leading dot would become file data.
+            client_socket.sendall(b"EOF")
         print(f"File '{file_name}' sent successfully.")
     except Exception as e:
         print(f"File '{file_name}' could not be uploaded. Error: {e}")
@@ -201,6 +213,9 @@ def main():
         if terminate:
             os._exit(1)  # Force terminate all threads
         auth_status = client_socket.recv(BUFFER_SIZE).decode()
+        if not auth_status:
+            print("Server closed the secure connection.")
+            clean_shutdown()
 
         if auth_status == "200 Success":
             global login

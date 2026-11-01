@@ -2,3 +2,5 @@ id_passwd.txt
 __pycache__/
 *.py[cod]
 /users.db*
+/certs/
+*.key

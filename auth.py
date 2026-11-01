@@ -1,7 +1,7 @@
 """Password hashing, verification and local account administration.
 
 SQLite stores encoded hashes, never plaintext passwords. The client/server
-protocol still needs TLS to protect passwords while they travel over a network.
+protocol uses TLS to protect passwords while they travel over a network.
 """
 
 import argparse
