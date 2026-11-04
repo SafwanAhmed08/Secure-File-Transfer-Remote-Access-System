@@ -70,6 +70,7 @@ class Application:
         self.started = time.time()
         self.lock = threading.RLock()
         self.file_lock = threading.RLock()
+        self.user_file_locks = {}
         # Tokens live only on the server and in an HttpOnly cookie, never in
         # localStorage. Restarting the web server invalidates all web sessions.
         self.sessions = {}
@@ -87,7 +88,15 @@ class Application:
         # Unknown usernames still perform a password derivation to reduce simple
         # account enumeration by timing. This value is not a usable account.
         self.dummy_hash = self.auth.hash_password(secrets.token_urlsafe(32))
+        
+    def file_lock_for(self, username):
+        # Protect creation so two requests get the same lock for this account.
+        with self.lock:
+            if username not in self.user_file_locks:
+                self.user_file_locks[username] = threading.RLock()
 
+            return self.user_file_locks[username]
+        
     def db(self):
         # A new connection per operation avoids sharing connections across HTTP
         # threads. Callers use `with app.db()` for commit/rollback; the wrapper
@@ -411,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/files" and method == "DELETE":
             name = query.get("name", [""])[0]
             file_path = self.app.file_path(username, name)
-            with self.app.file_lock:
+            with self.app.file_lock_for(username):
                 if not file_path.is_file():
                     raise ApiError("File not found.", 404)
                 file_path.unlink()
@@ -482,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
         # The raw file body avoids a multipart parser and streams to disk instead
         # of buffering a whole 100 MB file in memory. A temporary file prevents
         # incomplete uploads appearing in the user's browser listing.
-        with self.app.file_lock:
+        with self.app.file_lock_for(username):
             if destination.exists():
                 raise ApiError("A file with that name already exists. Rename it before uploading.", 409)
             if sum(item["size"] for item in self.app.files(username)) + length > USER_QUOTA:
