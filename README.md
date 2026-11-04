@@ -14,7 +14,6 @@ python3 server.py
 
 Open **https://127.0.0.1:8443** and use your existing username and password.
 Stop the server with Ctrl+C. You do not need `client.py` for the website.
-There is no separate web_server.py process, and ports 9999/10000 are no longer used.
 
 The localhost development certificate is self-signed, so your browser must trust
 it before using HTTPS. Review/trust your own certificate yourself. For UI work
