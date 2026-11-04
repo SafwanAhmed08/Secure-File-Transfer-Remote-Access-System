@@ -1,6 +1,5 @@
 """Real TLS handshakes and application tests using disposable local fixtures."""
 
-import ast
 import hashlib
 import os
 from pathlib import Path
@@ -145,107 +144,77 @@ class TLSTests(unittest.TestCase):
 
 
 class ApplicationTLSTests(unittest.TestCase):
-    def test_both_channels_login_upload_download_and_shutdown(self):
+    def test_one_server_for_terminal_and_browser_api(self):
+        from client import RelayClient, ClientError
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("auth.py", "database.py", "tls_transport.py"):
+            for name in ("server.py", "auth.py", "database.py", "tls_transport.py"):
                 shutil.copyfile(source / name, root / name)
+            shutil.copytree(source / "web", root / "web")
             cert, _ = generate_certificate(root / "certs")
             auth.set_password("tls_test", "disposable-password", root / "users.db")
-
-            # Pick two free adjacent ports; do not start/stop a user's real server.
-            for _ in range(30):
-                with socket.socket() as first, socket.socket() as second:
-                    first.bind(("127.0.0.1", 0))
-                    port = first.getsockname()[1]
-                    if port >= 65535:
-                        continue
-                    try:
-                        second.bind(("127.0.0.1", port + 1))
-                    except OSError:
-                        continue
-                    break
-            else:
-                self.fail("Could not allocate adjacent test ports.")
-            server_source = (source / "server.py").read_text().replace("PORT = 9999", f"PORT = {port}", 1)
-            (root / "server.py").write_text(server_source)
-            process = subprocess.Popen([sys.executable, "-u", "-B", "server.py"], cwd=root,
-                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            # Only one ephemeral listening port is needed for both interfaces.
+            with socket.socket() as reserved:
+                reserved.bind(("127.0.0.1", 0))
+                port = reserved.getsockname()[1]
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-B", "server.py", "--port", str(port)],
+                cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
             output = queue.Queue()
             def collect():
                 for line in process.stdout:
                     output.put(line)
             reader = threading.Thread(target=collect, daemon=True)
             reader.start()
+            client = RelayClient(f"https://127.0.0.1:{port}", cert)
             try:
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     line = output.get(timeout=max(0.01, deadline - time.monotonic()))
-                    if "TLS server listening" in line:
+                    if "Relay is ready" in line:
                         break
                 else:
-                    self.fail("Test server did not start.")
-                # The real application must reject raw TCP on BOTH ports and
-                # stay available for the next correctly secured client.
-                with socket.create_connection(("127.0.0.1", port), timeout=3) as raw:
-                    raw.sendall(b"GET / HTTP/1.0\r\n\r\n")
-                    try:
-                        self.assertEqual(raw.recv(128), b"")
-                    except ConnectionResetError:
-                        pass
-                context = create_client_context(cert)
-                with connect_tls("127.0.0.1", port, context) as incomplete:
-                    incomplete.settimeout(3)
-                    with socket.create_connection(("127.0.0.1", port + 1), timeout=3) as raw:
-                        raw.sendall(b"GET / HTTP/1.0\r\n\r\n")
-                        try:
-                            self.assertEqual(incomplete.recv(128), b"")
-                        except ssl.SSLError:
-                            pass
-                with connect_tls("127.0.0.1", port, context) as data:
-                    with connect_tls("127.0.0.1", port + 1, context) as notifications:
-                        data.settimeout(5)
-                        notifications.settimeout(5)
-                        self.assertIsInstance(data, ssl.SSLSocket)
-                        self.assertIsInstance(notifications, ssl.SSLSocket)
-                        data.sendall(b"tls_test---wrong")
-                        self.assertEqual(data.recv(128), b"Error")
-                        data.sendall(b"tls_test---disposable-password")
-                        self.assertEqual(receive_exact(data, len(b"200 Success")), b"200 Success")
-                        self.assertIn(b"uploading", data.recv(4096))
+                    self.fail("Single server entry point did not start.")
+                with self.assertRaises(ClientError) as rejected:
+                    client.login("tls_test", "wrong")
+                self.assertEqual(rejected.exception.status, 401)
+                session = client.login("tls_test", "disposable-password")
+                self.assertTrue(session["secure"])
+                self.assertFalse(session["admin"])
 
-                        # Exercise the real client's upload function in isolation.
-                        # This avoids importing its top-level network connections.
-                        tree = ast.parse((source / "client.py").read_text())
-                        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                                        and node.name == "send_file")
-                        namespace = dict(terminate=False, client_socket=data, os=os, time=time,
-                                         BUFFER_SIZE=128 * 1024)
-                        exec(compile(ast.Module(body=[function], type_ignores=[]), "client.py", "exec"), namespace)
-                        payload = bytes(range(256)) * 8
-                        upload = root / "binary.dat"
-                        upload.write_bytes(payload)
-                        data.sendall(b"1")
-                        namespace["send_file"](str(upload))
-                        self.assertIn(b"uploading", data.recv(4096))
-                        stored = root / "server_uploads/client_tls_test/binary.dat"
-                        self.assertEqual(stored.read_bytes(), payload)
+                # The browser UI is served by the same HTTPS listener. Use the
+                # verified terminal client's transport to fetch its static page.
+                from urllib.request import Request
+                with client.opener.open(Request(client.base_url + "/"), timeout=3) as page:
+                    self.assertIn(b"Relay", page.read())
 
-                        data.sendall(b"3")
-                        data.sendall(b"Send files in drive")
-                        self.assertIn(b"binary.dat", data.recv(4096))
-                        data.sendall(b"binary.dat")
-                        self.assertEqual(receive_exact(data, 3), b"200")
-                        self.assertEqual(receive_exact(data, len(payload)), payload)
-                        self.assertEqual(receive_exact(data, 3), b"EOF")
-                        data.sendall(b"Rx Complete")
-                        self.assertIn(b"uploading", data.recv(4096))
+                payload = bytes(range(256)) * 8 + b"EOF.EOF\x00"
+                upload = root / "binary.dat"
+                upload.write_bytes(payload)
+                client.upload(upload)
+                self.assertTrue(any(file["name"] == "binary.dat" for file in client.list_files()))
+                self.assertEqual((root / "server_uploads/client_tls_test/binary.dat").read_bytes(), payload)
+                downloaded = client.download("binary.dat", root / "downloads/binary.dat")
+                self.assertEqual(downloaded.read_bytes(), payload)
+                with self.assertRaises(ClientError):
+                    client.download("binary.dat", downloaded)
+                with self.assertRaises(ClientError) as duplicate:
+                    client.upload(upload)
+                self.assertEqual(duplicate.exception.status, 409)
 
-                        # SIGTERM makes the real server send its TLS notification.
-                        process.terminate()
-                        self.assertEqual(notifications.recv(128), b"Terminate")
-                        process.wait(timeout=5)
+                text = root / "notes.txt"
+                text.write_text("One backend for both clients.")
+                client.upload(text)
+                self.assertEqual(client.preview("notes.txt"), text.read_text())
+                client.delete("notes.txt")
+                client.delete("binary.dat")
+                self.assertEqual(client.list_files(), [])
+                client.logout()
+                with self.assertRaises(ClientError) as signed_out:
+                    client.list_files()
+                self.assertEqual(signed_out.exception.status, 401)
             finally:
                 if process.poll() is None:
                     process.terminate()

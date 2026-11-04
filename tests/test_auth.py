@@ -1,16 +1,12 @@
 """Authentication regression tests; all account data lives in temporary folders."""
 
-import ast
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
-import socket
 import sqlite3
 import stat
 import tempfile
-import threading
 import unittest
-from unittest.mock import Mock
 
 import auth
 import database
@@ -100,77 +96,6 @@ class AccountTests(unittest.TestCase):
             return auth.authenticate_user(username, f"password-{number}", self.path)
         with ThreadPoolExecutor(max_workers=4) as pool:
             self.assertTrue(all(pool.map(create_and_read, range(4))))
-
-
-class ServerLoginTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        # Compile the actual server functions without executing the legacy global
-        # socket creation and signal registration during test discovery.
-        path = Path(__file__).resolve().parents[1] / "server.py"
-        tree = ast.parse(path.read_text())
-        handlers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-                    and node.name in {"validate_user", "on_user"}]
-        if len(handlers) != 2:
-            raise AssertionError("Expected exactly one login handler and one connection handler.")
-        cls.code = compile(ast.Module(body=handlers, type_ignores=[]), str(path), "exec")
-
-    def setUp(self):
-        self.folder = tempfile.TemporaryDirectory()
-        self.addCleanup(self.folder.cleanup)
-        self.path = Path(self.folder.name) / "users.db"
-        auth.set_password("alice", "correct---password", self.path)
-        self.namespace = dict(
-            terminate_server=False, BUFFER_SIZE=128 * 1024, sqlite3=sqlite3,
-            uname={}, fc={}, clients=[], termination_clients=[], send_options=Mock(),
-            authenticate_user=lambda username, password: auth.authenticate_user(username, password, self.path),
-        )
-        exec(self.code, self.namespace)
-        self.address = ("127.0.0.1", 12345)
-
-    def test_wrong_password_then_correct_password_reaches_menu_over_socket(self):
-        # A socket pair exercises actual byte I/O without opening network ports.
-        server_side, client_side = socket.socketpair()
-        server_side.settimeout(3)
-        client_side.settimeout(3)
-        termination = Mock()
-        worker = threading.Thread(target=self.namespace["on_user"],
-                                  args=(server_side, self.address, termination))
-        worker.start()
-        try:
-            client_side.sendall(b"alice---wrong")
-            self.assertEqual(client_side.recv(128), b"Error")
-            client_side.sendall(b"alice---correct---password")
-            self.assertEqual(client_side.recv(128), b"200 Success")
-            worker.join(3)
-            self.assertFalse(worker.is_alive())
-            self.namespace["send_options"].assert_called_once_with(server_side, self.address)
-        finally:
-            client_side.close()
-            server_side.close()
-            worker.join(3)
-
-    def test_malformed_unknown_and_disconnected_client_never_reaches_menu(self):
-        client = Mock()
-        client.recv.side_effect = [b"no separator", b"\xff", b"unknown---anything", b""]
-        termination = Mock()
-        self.namespace["on_user"](client, self.address, termination)
-        self.namespace["send_options"].assert_not_called()
-        self.assertEqual(self.namespace["uname"], {})
-        self.assertEqual([call.args[0] for call in client.sendall.call_args_list],
-                         [b"Error", b"Error", b"Error"])
-        client.close.assert_called_once()
-        termination.close.assert_called_once()
-        self.assertEqual(self.namespace["clients"], [])
-        self.assertEqual(self.namespace["termination_clients"], [])
-
-    def test_database_failure_never_reaches_menu(self):
-        self.namespace["authenticate_user"] = Mock(side_effect=sqlite3.OperationalError("unavailable"))
-        client = Mock()
-        client.recv.return_value = b"alice---correct---password"
-        self.namespace["on_user"](client, self.address, Mock())
-        self.namespace["send_options"].assert_not_called()
-        client.sendall.assert_not_called()
 
 
 if __name__ == "__main__":

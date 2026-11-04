@@ -4,3 +4,4 @@ __pycache__/
 /users.db*
 /certs/
 *.key
+/server_uploads

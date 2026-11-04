@@ -1,260 +1,180 @@
-# Distributed File Orchestration and Synchronization: Multi-Node Data-Transfer-Framework for Linux
+# Secure File Transfer & Remote Access System
 
-## System Architecture Overview
+A local file server with a browser interface and an optional terminal client.
+**`server.py` is the only backend.** Both clients use its HTTPS API for the same
+authentication, file operations, permissions, limits and activity records.
 
-### 1. Network Communication Model
-- Protocol: Custom TCP communication over verified TLS (minimum TLS 1.2)
-- Host: Localhost (127.0.0.1)
-- Primary Port: 9999
-- Termination Port: 10000
-- Buffer Size: 128 KB
+## Run the application
 
-### 2. Authentication Mechanism
-- Credential Storage: SQLite (`users.db`), containing salted PBKDF2-HMAC-SHA256 password hashes
-- Authentication Flow:
-  1. Client sends username/password
-  2. Server looks up the user in SQLite and verifies the stored password hash
-  3. Successful login generates user-specific session
-  4. Failed attempts trigger re-authentication
-
-### 3. User Session Management
-- User-specific directory creation: `client_{username}`
-- Isolated file storage per user
-- Concurrent user support via threading
-
-## System Components
-
-### Core Modules
-1. **Authentication Module**
-   - User credential verification
-   - Session initialization
-   - Access control
-
-2. **File Management Module**
-   - Upload/download capabilities
-   - File listing
-   - File preview
-   - File deletion
-
-3. **Communication Handler**
-   - Socket management
-   - Client-server interaction
-   - Graceful termination protocols
-
-## Security Considerations and Future Enhancements
-
-### Recommended Security Upgrades
-1. **Authentication Improvements**
-   - Salted password hashing implemented; add login rate limiting
-   - Add multi-factor authentication
-   - Create role-based access control
-
-2. **Communication Security**
-   - TLS implemented on both connections with client-side server certificate verification
-   - Implement certificate-based authentication
-   - Add secure key exchange mechanism
-
-3. **Logging and Auditing**
-- Objective: Track client activity and detect suspicious behavior.
-- Include system-level alerts for failed uploads/downloads or unauthorized access attempts.
-
-
-### Proposed Encryption Strategy
-- Implement asymmetric key encryption for initial handshake
-- Use AES-256 for subsequent symmetric encryption
-- Rotate encryption keys periodically
-
-## System Limitations and Constraints
-- Single-host deployment
-- Local development certificate requires explicit trust and expires after 30 days
-- No advanced access control
-- Limited file type support
-
-## Performance Optimization Strategies
-- Implement connection pooling
-- Add concurrent file transfer capabilities
-- Optimize buffer management
-- Introduce transfer resumption mechanism
-
-## Compliance and Standards
-- POSIX file system compatibility
-- Linux kernel socket programming standards
-- Basic OWASP security recommendations
-
-## Deployment Guidelines
-1. Create an account with `python3 auth.py set-password USERNAME`
-2. Set appropriate file permissions
-3. Configure firewall rules
-4. Enable logging mechanisms
-
-## Potential Extension Points
-- Cloud storage integration
-- Distributed file synchronization
-- Advanced metadata management
-- Machine-to-machine transfer protocols
-
-## Recommended Technology Stack
-- Python 3.8+
-- Socket Programming
-- Threading
-- SSL/cryptography libraries
-- Logging frameworks
-
-## Error Handling and Resilience
-- Graceful connection termination
-- Comprehensive exception management
-- Client-side and server-side timeout mechanisms
-
-## Monitoring and Observability
-- System health checks
-- Performance metrics collection
-- Real-time activity tracking
-
-## License and Usage
-- Open-source
-- Community-driven development model
-
-## Contribution Guidelines
-1. Write comprehensive unit tests
-2. Document all new features
-3. Maintain backward compatibility
-
-
-
-## SQLite accounts: running and understanding the code
-
-Only Python's standard library is required. The old `id_passwd.txt` is no longer
-read or written. Existing text-file accounts are not imported; create fresh
-accounts. Existing SQLite accounts are preserved.
+From this repository:
 
 ```sh
-# Optional: create an empty database and users table.
-python3 database.py
+python3 server.py
+```
 
-# Create an account, or replace the password for an existing username.
-# Passwords are entered at hidden prompts, not included in the command.
-python3 auth.py set-password alice
+Open **https://127.0.0.1:8443** and use your existing username and password.
+Stop the server with Ctrl+C. You do not need `client.py` for the website.
+There is no separate web_server.py process, and ports 9999/10000 are no longer used.
 
-# Once per local checkout: generate the development certificate.
+The localhost development certificate is self-signed, so your browser must trust
+it before using HTTPS. Review/trust your own certificate yourself. For UI work
+without configuring browser trust, use loopback-only development mode:
+
+```sh
+python3 server.py --http --port 8080
+```
+
+Then open **http://127.0.0.1:8080**. This mode is unencrypted and cannot bind to
+another device's address. The terminal client requires HTTPS.
+
+## First-time setup only
+
+Skip these steps if accounts and certificates already exist:
+
+```sh
+# Generate a local development certificate/key; existing keys are never replaced.
 python3 setup_tls.py
 
-# In separate terminals:
-python3 server.py
+# Create an account. Running this for an existing username resets its password.
+python3 auth.py set-password alice
+```
+
+Passwords are entered through hidden prompts and stored as salted
+PBKDF2-HMAC-SHA256 hashes in `users.db`. The old plaintext credential file is not
+used. Database and upload directories are resolved relative to this repository.
+Existing accounts, hashes, administrator grants and uploaded files are preserved.
+
+## Server dashboard
+
+No user is automatically an administrator. Grant access when ready:
+
+```sh
+python3 server.py --grant-admin YOUR_USERNAME
+```
+
+Refresh the browser page to see the **My workspace / Server** switch. Every admin
+API request checks the role on the server; switching frontend views cannot grant
+permissions. The dashboard shows actual storage/account/session statistics,
+account creation and password reset, session revocation, and recent activity.
+Sessions and audit events cover browser **and terminal** API clients.
+
+## Optional terminal interface
+
+With the same HTTPS server running:
+
+```sh
 python3 client.py
 ```
 
-`set-password` and the server both initialise the schema automatically, so running
-`database.py` separately is optional. Database creation never makes a default user.
-The database path is anchored to `database.py`; running from another working
-folder uses the same account store. Keep `users.db` and related journal files out
-of Git. The file is restricted to owner access on macOS/Linux. Real passwords
-previously committed to Git should be changed; ignoring a file does not remove
-its history.
+It offers upload, list, download, delete, preview and sign out. It does not read
+`users.db` or manage server-side files directly. It calls the exact same API as
+the browser, including CSRF/session protection and file limits. The server's
+certificate is verified against `certs/server.crt`; its private key is never used
+by the client. Use `--url` and `--cert` for another trusted HTTPS server.
 
-### Read the implementation in this order
+## One backend, one implementation
 
-1. **`auth.hash_password`** derives a PBKDF2-HMAC-SHA256 hash with 600,000
-   iterations and a fresh 16-byte random salt. The stored string includes the
-   algorithm, iteration count, salt, and digest. Hashing does not encrypt a password.
-2. **`database.initialise_database`** defines a users table. `UNIQUE` enforces
-   distinct usernames and creates an index; `NOT NULL` does not reject empty
-   strings, so `auth.py` validates usernames and rejects empty passwords.
-3. **`auth.set_password`** hashes first, then saves through a database upsert.
-   A reset updates one row without changing its user ID or rewriting every account.
-4. **`database.get_password_hash`** looks up one user using a `?` parameter.
-   Parameters separate user input from SQL syntax and prevent SQL injection.
-5. **`auth.authenticate_user`** retrieves that hash and verifies it with the
-   original salt and a constant-time digest comparison. Missing users, invalid
-   hashes, and incorrect passwords are rejected. No plaintext fallback exists.
-6. **`server.validate_user`** retries login in a loop. `on_user` checks its boolean
-   result before opening the file menu. There is one authentication handler.
+```text
+Browser: web/index.html + styles.css + app.js ─┐
+                                            ├─ HTTPS :8443 ─ server.py
+Optional terminal: client.py ────────────────┘                  │
+                                                              ├─ auth.py
+                                                              ├─ database.py → users.db
+                                                              └─ server_uploads/client_USERNAME/
+```
 
-Each database operation owns its connection, so client threads do not share a
-SQLite connection. Transactions commit successful updates and roll back failed
-updates. Connections are explicitly closed afterward. SQLite supports one writer
-at a time; connections wait up to five seconds for a write lock. Password hashing
-happens before the write transaction to keep that lock short. Password resets are
-seen by subsequent login attempts; they do not revoke already logged-in sessions.
+`server.py` owns HTTP routing, sessions, user/admin authorisation, upload streaming,
+listing, previews, downloads, deletion, limits and audit records. `auth.py` and
+`database.py` are shared helper modules, not independent servers. Importing the
+server does not start listeners, register signal handlers or modify account data.
 
-Run the regression tests:
+The old custom TCP/EOF protocol has been replaced by HTTP requests with explicit
+body lengths. Files containing `EOF` bytes transfer normally. There are no
+separate shutdown connections or duplicate file-operation implementations.
+
+## Browser features
+
+- Responsive client workspace and administrator dashboard.
+- Multi-file selection and drag/drop uploads with progress.
+- File search, type filters, sorting, list/grid views, and confirmed deletion.
+- Safe text/image previews and downloads for other file types.
+- Account settings, activity, user management and client session revocation.
+
+All files stay on your local server. No external JavaScript, fonts, analytics or
+hosted storage is used. The server is a Python standard-library development
+server; internet deployment needs a production stack and deployment hardening.
+
+## Security and limits
+
+- HTTPS defaults to TLS 1.2 or newer. `certs/server.key` stays private and untracked.
+- Password hashes use PBKDF2-HMAC-SHA256, 600,000 iterations, and a random 16-byte salt.
+- Sessions expire after 8 hours and live in memory; restart signs clients out.
+- HTTPS cookies are Secure, HttpOnly and SameSite=Strict. Mutations need a CSRF token.
+- Filename/path validation and per-user folders restrict file access.
+- Uploads are limited to 100 MB per file and 1 GB per account for **both** clients.
+- Duplicate filenames never overwrite existing server files.
+- Login attempts are rate-limited; static serving never exposes source, keys or the DB.
+- API password resets revoke affected sessions. Password changes through the local
+  `auth.py` command do not revoke already-issued sessions.
+- Audit history is bounded to 5,000 events. Disk files are not encrypted at rest.
+
+For another device, use HTTPS with a device-trusted certificate covering the Mac's
+actual LAN IP/name and bind using `--host YOUR_LAN_IP`. The localhost certificate
+alone does not configure Android/LAN access.
+
+## Tests and learning guide
 
 ```sh
 python3 -B -m unittest discover -s tests -v
+node --check web/app.js
 ```
 
-The tests use temporary databases, never real account data. They cover hashing,
-account creation/reset, uniqueness, SQL parameter handling, threaded lookups,
-and the rule that failed authentication cannot enter the file menu.
-
-### Remaining security work
-
-Both TCP connections now require TLS, including the shutdown notification port.
-Message framing, login rate limiting, secure pairing of simultaneous clients'
-two connections, and validation of file-operation paths remain separate
-improvements. TLS protects bytes in transit; it does not fix these application
-protocol or authorisation issues.
+Tests use disposable accounts, files, keys and ports. They cover password storage,
+verified TLS, both API clients, binary transfers, ownership boundaries, admin
+permissions, CSRF, expiry, rate limits and file validation. No real user data is
+changed. Read [WEB_INTERFACE.md](WEB_INTERFACE.md) for the code walkthrough.
 
 
-## TLS: setup and learning guide
+## Temporary phone access through Cloudflare Tunnel
+
+This is an opt-in development tunnel, not a permanent deployment. Keep the app
+bound to loopback. Both phone-to-Cloudflare and Cloudflare-to-this-server use TLS;
+cloudflared explicitly trusts the local certificate. Nothing disables TLS checks.
+
+Install the connector on the Mac once:
 
 ```sh
-# Generate a local certificate/key (already generated when TLS was installed).
-python3 setup_tls.py
-
-# Start in separate terminals. Existing SQLite accounts still work.
-python3 server.py
-python3 client.py
+brew install cloudflared
 ```
 
-No new Python packages are needed. Certificate creation uses the installed
-`openssl` command. `setup_tls.py` refuses to overwrite an existing certificate or
-key. The generated certificate is valid for 30 days and covers `localhost`,
-`127.0.0.1`, and `::1`; the application's default connections still use IPv4
-`127.0.0.1` on ports 9999 and 10000. Expired certificates are rejected.
+From this repository, start the connector in one terminal:
 
-- **`certs/server.key`** is the private key, readable only by its owner on
-  macOS/Linux. Keep it on the server and never commit or distribute it.
-- **`certs/server.crt`** is the public certificate. The client explicitly trusts
-  this file and verifies that the hostname/IP it connects to appears in its
-  Subject Alternative Names. Install it on a client through a trusted channel.
-- Both artifacts are ignored by Git. Copy only `server.crt` to a different
-  client's `certs/` folder; it does not need `server.key` or account database files.
+```sh
+cloudflared tunnel --url https://127.0.0.1:8443 --origin-ca-pool certs/server.crt
+```
 
-For certificate renewal, stop the server, deliberately move the old certificate
-and key to a private location, rerun `setup_tls.py`, and replace trusted copies
-on clients. Changing HOST to another IP/name requires a certificate with that
-IP/name in its SAN. Do not disable verification to bypass an error. For deployment,
-use an appropriate CA-issued certificate and trust configuration instead of this
-localhost development certificate. Trust is configured per application; nothing
-is installed into the operating system's trust store.
+It prints a temporary `https://...trycloudflare.com` URL. The origin may report
+connection refused until the app starts. In a second terminal, use that exact URL:
 
-### What the code does
+```sh
+python3 server.py --public-origin https://YOUR-EXACT-URL.trycloudflare.com
+```
 
-1. `create_server_context()` loads the certificate and private key. A minimum
-   TLS version of 1.2 allows negotiation of TLS 1.3 on supported installations.
-2. `create_client_context()` loads the trusted certificate. Certificate and
-   hostname verification remain enabled; no insecure/plaintext fallback exists.
-3. `connect_tls()` connects TCP, then completes a verified TLS handshake before
-   returning the socket. No username, password or file data is sent before that.
-4. The server accepts a TCP socket and wraps it with TLS before accepting and
-   securing the notification socket. That ordering avoids a startup deadlock.
-5. Handshakes and the wait for the second connection have a five-second timeout.
-   After a handshake, sockets return to blocking mode so typing a password or
-   selecting a file is not subject to that short timeout.
-6. Application `sendall()` and `recv()` calls then pass through the TLS socket:
-   the TLS library handles encryption, integrity checks and session keys.
-   SQLite password hashing and username/password login remain separate.
+Open the printed public URL on your phone and sign in. No phone certificate
+installation or same-Wi-Fi requirement is needed. The server permits only the
+explicit public hostname, keeps Origin and CSRF checks, and still issues Secure
+cookies. Do not use `--http`, `--no-tls-verify`, wildcard hosts or router port forwarding.
 
-This uses server-authenticated TLS, not mutual TLS: the client verifies the
-server certificate, and the server authenticates users through their passwords.
-See [Python's ssl documentation](https://docs.python.org/3/library/ssl.html).
+The tunnel exposes the app's login page to the internet, and Cloudflare carries
+its traffic. Use test data for this development server. Anyone with the link can
+reach the login page; file access still requires an account. Both the Mac and
+both processes must stay running. Ctrl+C stops them. Quick Tunnel URLs are
+for testing, change between runs, and stop working when the connector exits.
+Use a named tunnel/custom domain for a stable deployment.
 
-The upload EOF marker was also corrected to match the receiver exactly; the
-previous `.EOF` marker appended an extra dot to uploaded files. The legacy EOF
-protocol still needs length-based framing for arbitrary binary contents and
-unpredictable TCP/TLS read boundaries.
+If a new tunnel URL is generated, restart `server.py` with the new exact origin.
+If you replaced the self-signed certificate with a CA-signed one, point
+`--origin-ca-pool` at its issuer's public CA bundle instead. Never share a private key.
 
-Run `python3 -B -m unittest discover -s tests -v` for authentication and TLS tests.
-TLS tests use temporary keys/certificates and account data. They exercise trusted
-connections, untrusted/wrong-host rejection, plaintext rejection, bounded
-handshakes, both application channels, and encrypted upload/download behavior.
+References: [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
+and [HTTPS origin settings](https://developers.cloudflare.com/tunnel/troubleshooting/).

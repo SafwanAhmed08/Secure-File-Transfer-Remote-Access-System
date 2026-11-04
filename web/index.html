@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#183c32">
+  <meta name="description" content="Relay — your files, on your own server.">
+  <title>Relay — Your personal file server</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app"><div class="boot">Connecting to your server…</div></div>
+  <div id="toasts" role="status" aria-live="polite"></div>
+  <dialog id="modal" aria-labelledby="modal-title"></dialog>
+  <input type="file" id="file-picker" multiple hidden>
+  <noscript>Relay needs JavaScript to manage your files. Enable it and reload this page.</noscript>
+</body>
+</html>
